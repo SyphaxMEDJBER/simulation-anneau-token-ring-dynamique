@@ -1,2 +1,50 @@
-# simulation-anneau-token-ring-dynamique
-Simulation d’un réseau en anneau dynamique inspiré du protocole Token Ring (IEEE 802.5), implémentée en C avec sockets et communication inter-processus. Gestion du jeton, émission unicast/broadcast, transfert de fichiers fiable, connexion/déconnexion dynamique des nœuds et tolérance aux pannes.
+Simulation Anneau Token Ring Dynamique
+🎯 Objectif
+
+Simulation d’un réseau en anneau dynamique inspiré du protocole IEEE 802.5 (Token Ring).
+Les machines sont représentées par des processus communicants via sockets.
+
+🏗 Architecture
+
+Chaque machine est composée de deux processus :
+
+Driver : gestion du jeton et des communications sur l’anneau
+
+Comm : interface utilisateur (émission, réception, transfert)
+
+Communication interne via socket locale.
+Communication externe via sockets unidirectionnelles formant l’anneau.
+
+⚙ Fonctionnalités prévues
+
+Émission unicast
+
+Diffusion broadcast
+
+Transfert de fichiers fiable (ASCII / binaire)
+
+Connexion / Déconnexion dynamique
+
+Gestion et régénération du jeton
+
+Tolérance aux pannes
+
+🛠 Technologies
+
+C
+
+Sockets TCP
+
+Communication inter-processus (IPC)
+
+Linux
+
+📌 Concepts abordés
+
+Conception de protocole réseau
+
+Gestion de jeton
+
+Architecture distribuée
+
+Synchronisation et gestion des erreurs
