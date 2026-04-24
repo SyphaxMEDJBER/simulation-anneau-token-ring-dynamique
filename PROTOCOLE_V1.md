@@ -111,6 +111,7 @@ Pour commencer sans se disperser :
 - anneau statique
 - 2 machines minimum
 - unicast seulement au debut
+- socket UNIX `stream` pour le lien local `Comm` <-> `Driver`
 - pas de connexion dynamique dans l'etape suivante
 - pas de transfert de fichier dans l'etape suivante
 
@@ -123,8 +124,8 @@ Pour commencer sans se disperser :
 
 Le fichier `ring_common.h` contient les declarations communes.
 Le fichier `ring_common.c` contient leur implementation.
-Le fichier `ring_driver.c` contient une premiere boucle minimale de routage.
-Le fichier `ring_comm.c` contient une premiere interface locale minimale.
+Le fichier `ring_driver.c` contient une premiere boucle minimale du Driver avec socket local UNIX.
+Le fichier `ring_comm.c` contient une premiere interface locale minimale connectee au Driver.
 
 ## Critere de validation de la V1
 

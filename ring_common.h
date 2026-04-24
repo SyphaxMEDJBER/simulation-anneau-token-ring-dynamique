@@ -7,8 +7,12 @@
 #include <stdlib.h>
 /* Fonctions de manipulation memoire/chaines. */
 #include <string.h>
+/* select. */
+#include <sys/select.h>
 /* Taille maximale de la charge utile d'une trame. */
 #define RING_DATA_MAX 240
+/* Taille max d'un chemin de socket UNIX. */
+#define RING_SOCK_PATH_MAX 108
 
 /* Valeur speciale pour une diffusion a tout l'anneau. */
 #define RING_BROADCAST_ID (-1)
@@ -48,5 +52,6 @@ int recv_ring_msg(int fd, struct ring_msg *msg);
 void ring_msg_init(struct ring_msg *msg, int type, int src, int dst);
 void ring_msg_set_text(struct ring_msg *msg, const char *text);
 const char *ring_msg_type_name(int type);
+void ring_make_local_path(char *path, size_t size, int machine_id);
 
 #endif

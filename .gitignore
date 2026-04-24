@@ -1,0 +1,9 @@
+*.o
+*.out
+
+ring_driver
+ring_comm
+
+*~
+*.swp
+*.swo

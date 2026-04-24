@@ -101,3 +101,9 @@ const char *ring_msg_type_name(int type)
     default:             return "MSG_UNKNOWN";
     }
 }
+
+/* Construit le chemin du socket local a partir de l'identifiant machine. */
+void ring_make_local_path(char *path, size_t size, int machine_id)
+{
+    snprintf(path, size, "/tmp/ring_local_%d.sock", machine_id);
+}

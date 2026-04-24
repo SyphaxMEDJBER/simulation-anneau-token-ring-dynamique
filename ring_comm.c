@@ -1,5 +1,29 @@
 /* Comm minimal du projet anneau. */
 #include "ring_common.h"
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+/* Se connecte au socket local du Driver. */
+static int connect_local_driver(int machine_id)
+{
+    int sock;
+    struct sockaddr_un addr;
+    char path[RING_SOCK_PATH_MAX];
+
+    ring_make_local_path(path, sizeof(path), machine_id);
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
+
+    sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock == -1) FATAL("socket local");
+
+    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == -1) FATAL("connect local");
+
+    return sock;
+}
 
 /* Affiche une trame recue depuis le Driver local. */
 static void print_local_msg(const struct ring_msg *msg)
@@ -71,21 +95,22 @@ int main(int argc, char *argv[])
     int local_fd;
 
     /*
-     * Arguments :
+     * Argument :
      *  machine_id : identifiant logique de la machine
-     *  local_fd   : descripteur du lien local vers Driver
      */
-    if (argc != 3) {
-        printf("Usage: %s machine_id local_fd\n", argv[0]);
+    if (argc != 2) {
+        printf("Usage: %s machine_id\n", argv[0]);
         exit(1);
     }
 
     machine_id = atoi(argv[1]);
-    local_fd = atoi(argv[2]);
+    local_fd = connect_local_driver(machine_id);
 
     printf("comm pret: machine=%d local=%d\n", machine_id, local_fd);
 
     comm_loop(local_fd, machine_id);
+
+    close(local_fd);
 
     return 0;
 }
