@@ -124,6 +124,7 @@ Pour commencer sans se disperser :
 Le fichier `ring_common.h` contient les declarations communes.
 Le fichier `ring_common.c` contient leur implementation.
 Le fichier `ring_driver.c` contient une premiere boucle minimale de routage.
+Le fichier `ring_comm.c` contient une premiere interface locale minimale.
 
 ## Critere de validation de la V1
 
