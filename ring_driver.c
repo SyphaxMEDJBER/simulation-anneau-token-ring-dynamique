@@ -10,7 +10,10 @@
 /* Etat local du Driver. */
 struct driver_state {
     int machine_id;
+    int left_port;
+    int right_port;
     int pending_valid;
+    int next_seq;
     struct ring_msg pending_msg;
 };
 
@@ -33,6 +36,8 @@ static int must_deliver_local(int machine_id, const struct ring_msg *msg)
  */
 static int must_forward_right(int machine_id, const struct ring_msg *msg)
 {
+    if (msg->type == MSG_BROADCAST && msg->src == machine_id) return 0;
+    if (msg->type == MSG_INFO_REQ && msg->src == machine_id) return 0;
     if (msg->dst == machine_id) return 0;
     return 1;
 }
@@ -46,6 +51,25 @@ static void send_status_to_comm(int local_fd, int machine_id, const char *text)
     ring_msg_set_text(&msg, text);
 
     if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg status");
+}
+
+/* Ajoute une ligne d'information machine dans data si la place suffit. */
+static void append_machine_info(struct ring_msg *msg, const struct driver_state *state)
+{
+    char line[96];
+    size_t cur;
+    int n;
+
+    cur = (size_t)msg->size;
+    n = snprintf(line, sizeof(line), "machine=%d portE=%d portS=%d\n",
+                 state->machine_id, state->left_port, state->right_port);
+    if (n <= 0) return;
+
+    if (cur + (size_t)n >= RING_DATA_MAX) return;
+
+    memcpy(msg->data + cur, line, (size_t)n);
+    msg->size += n;
+    msg->data[msg->size] = '\0';
 }
 
 /* Affichage simple d'une trame pour le debug. */
@@ -154,7 +178,7 @@ static void handle_local_msg(struct driver_state *state, int local_fd)
 
     print_msg("Driver recoit depuis Comm:", &msg);
 
-    if (must_deliver_local(state->machine_id, &msg)) {
+    if (msg.type == MSG_DATA && must_deliver_local(state->machine_id, &msg)) {
         if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
         return;
     }
@@ -162,6 +186,13 @@ static void handle_local_msg(struct driver_state *state, int local_fd)
     if (state->pending_valid) {
         send_status_to_comm(local_fd, state->machine_id, "Emission deja en attente");
         return;
+    }
+
+    msg.src = state->machine_id;
+    msg.seq = ++state->next_seq;
+
+    if (msg.type == MSG_INFO_REQ) {
+        append_machine_info(&msg, state);
     }
 
     state->pending_msg = msg;
@@ -190,6 +221,30 @@ static void handle_left_msg(struct driver_state *state, int left_fd, int right_f
         }
 
         if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg token");
+        return;
+    }
+
+    if (msg.type == MSG_BROADCAST) {
+        if (msg.src == state->machine_id) {
+            printf("Driver recupere sa propre diffusion, fin de tour\n");
+            return;
+        }
+
+        if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
+        if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg right");
+        return;
+    }
+
+    if (msg.type == MSG_INFO_REQ) {
+        if (msg.src == state->machine_id) {
+            msg.type = MSG_INFO_REP;
+            msg.dst = state->machine_id;
+            if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
+            return;
+        }
+
+        append_machine_info(&msg, state);
+        if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg right");
         return;
     }
 
@@ -264,6 +319,8 @@ int main(int argc, char *argv[])
 
     memset(&state, 0, sizeof(state));
     state.machine_id = machine_id;
+    state.left_port = left_port;
+    state.right_port = right_port;
 
     listen_fd = create_local_server(machine_id, local_path, sizeof(local_path));
     left_local_fd = create_left_server(left_port);

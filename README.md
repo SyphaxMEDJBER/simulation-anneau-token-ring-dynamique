@@ -92,6 +92,15 @@ Gestion du jeton
 - le message n'est emis sur l'anneau qu'a la reception du `MSG_TOKEN`
 - apres emission, le jeton continue sa circulation
 
+Fonctions utilisateur de base
+
+- `Emettre` : envoi d'un message vers une machine destination
+- `Diffuser` : envoi d'un message a tout l'anneau
+- `Recuperer` : collecte des informations des machines de l'anneau
+
+Pour `Recuperer`, le message de requete circule dans l'anneau et chaque Driver
+ajoute une ligne d'information avant le retour a la machine source.
+
 Nettoyage
 
 ```bash
