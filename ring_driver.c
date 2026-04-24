@@ -1,4 +1,4 @@
-/* Driver minimal de l'anneau. */
+/* Driver minimal de l'anneau avec gestion du jeton. */
 #include "ring_common.h"
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -6,6 +6,13 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
+
+/* Etat local du Driver. */
+struct driver_state {
+    int machine_id;
+    int pending_valid;
+    struct ring_msg pending_msg;
+};
 
 /*
  * Retourne vrai si la trame doit etre livree au Comm local.
@@ -28,6 +35,17 @@ static int must_forward_right(int machine_id, const struct ring_msg *msg)
 {
     if (msg->dst == machine_id) return 0;
     return 1;
+}
+
+/* Envoie un message d'etat simple au Comm local. */
+static void send_status_to_comm(int local_fd, int machine_id, const char *text)
+{
+    struct ring_msg msg;
+
+    ring_msg_init(&msg, MSG_INFO_REP, machine_id, machine_id);
+    ring_msg_set_text(&msg, text);
+
+    if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg status");
 }
 
 /* Affichage simple d'une trame pour le debug. */
@@ -65,9 +83,7 @@ static int create_local_server(int machine_id, char *path, size_t path_size)
     return sock;
 }
 
-/*
- * Cree la socket TCP d'ecoute pour recevoir depuis le voisin gauche.
- */
+/* Cree la socket TCP d'ecoute pour recevoir depuis le voisin gauche. */
 static int create_left_server(int port)
 {
     int sock;
@@ -117,8 +133,20 @@ static int connect_right_peer(const char *host, int port)
     }
 }
 
+/* Injecte un jeton initial sur l'anneau. */
+static void inject_initial_token(int machine_id, int right_fd)
+{
+    struct ring_msg msg;
+
+    ring_msg_init(&msg, MSG_TOKEN, machine_id, RING_BROADCAST_ID);
+
+    printf("Driver injecte le jeton initial\n");
+
+    if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg token");
+}
+
 /* Traite un message recu depuis le Comm local. */
-static void handle_local_msg(int machine_id, int local_fd, int right_fd)
+static void handle_local_msg(struct driver_state *state, int local_fd)
 {
     struct ring_msg msg;
 
@@ -126,16 +154,23 @@ static void handle_local_msg(int machine_id, int local_fd, int right_fd)
 
     print_msg("Driver recoit depuis Comm:", &msg);
 
-    if (must_deliver_local(machine_id, &msg)) {
+    if (must_deliver_local(state->machine_id, &msg)) {
         if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
         return;
     }
 
-    if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg right");
+    if (state->pending_valid) {
+        send_status_to_comm(local_fd, state->machine_id, "Emission deja en attente");
+        return;
+    }
+
+    state->pending_msg = msg;
+    state->pending_valid = 1;
+    send_status_to_comm(local_fd, state->machine_id, "Message mis en attente du jeton");
 }
 
 /* Traite un message recu depuis le voisin gauche. */
-static void handle_left_msg(int machine_id, int left_fd, int right_fd, int local_fd)
+static void handle_left_msg(struct driver_state *state, int left_fd, int right_fd, int local_fd)
 {
     struct ring_msg msg;
 
@@ -143,17 +178,32 @@ static void handle_left_msg(int machine_id, int left_fd, int right_fd, int local
 
     print_msg("Driver recoit depuis anneau:", &msg);
 
-    if (must_deliver_local(machine_id, &msg)) {
+    if (msg.type == MSG_TOKEN) {
+        if (state->pending_valid) {
+            printf("Driver emet le message en attente puis retransmet le jeton\n");
+
+            if (send_ring_msg(right_fd, &state->pending_msg) == -1) FATAL("send_ring_msg pending");
+
+            send_status_to_comm(local_fd, state->machine_id, "Message emis sur l anneau");
+
+            state->pending_valid = 0;
+        }
+
+        if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg token");
+        return;
+    }
+
+    if (must_deliver_local(state->machine_id, &msg)) {
         if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
     }
 
-    if (must_forward_right(machine_id, &msg)) {
+    if (must_forward_right(state->machine_id, &msg)) {
         if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg right");
     }
 }
 
 /* Boucle principale du Driver. */
-static void driver_loop(int machine_id, int left_fd, int right_fd, int local_fd)
+static void driver_loop(struct driver_state *state, int left_fd, int right_fd, int local_fd)
 {
     fd_set rfds;
     int maxfd;
@@ -169,11 +219,11 @@ static void driver_loop(int machine_id, int left_fd, int right_fd, int local_fd)
         if (select(maxfd + 1, &rfds, NULL, NULL, NULL) == -1) FATAL("select");
 
         if (FD_ISSET(local_fd, &rfds)) {
-            handle_local_msg(machine_id, local_fd, right_fd);
+            handle_local_msg(state, local_fd);
         }
 
         if (FD_ISSET(left_fd, &rfds)) {
-            handle_left_msg(machine_id, left_fd, right_fd, local_fd);
+            handle_left_msg(state, left_fd, right_fd, local_fd);
         }
     }
 }
@@ -189,17 +239,20 @@ int main(int argc, char *argv[])
     int right_fd;
     const char *right_host;
     int right_port;
+    int inject_token;
     char local_path[RING_SOCK_PATH_MAX];
+    struct driver_state state;
 
     /*
      * Arguments :
-     *  machine_id : identifiant logique de la machine
-     *  left_port  : port TCP d'ecoute depuis le voisin gauche
-     *  right_host : hote du voisin droit
-     *  right_port : port TCP du voisin droit
+     *  machine_id   : identifiant logique de la machine
+     *  left_port    : port TCP d'ecoute depuis le voisin gauche
+     *  right_host   : hote du voisin droit
+     *  right_port   : port TCP du voisin droit
+     *  inject_token : 1 si ce Driver cree le jeton initial, sinon 0
      */
-    if (argc != 5) {
-        printf("Usage: %s machine_id left_port right_host right_port\n", argv[0]);
+    if (argc != 6) {
+        printf("Usage: %s machine_id left_port right_host right_port inject_token\n", argv[0]);
         exit(1);
     }
 
@@ -207,6 +260,10 @@ int main(int argc, char *argv[])
     left_port = atoi(argv[2]);
     right_host = argv[3];
     right_port = atoi(argv[4]);
+    inject_token = atoi(argv[5]);
+
+    memset(&state, 0, sizeof(state));
+    state.machine_id = machine_id;
 
     listen_fd = create_local_server(machine_id, local_path, sizeof(local_path));
     left_local_fd = create_left_server(left_port);
@@ -234,7 +291,11 @@ int main(int argc, char *argv[])
     close(listen_fd);
     close(left_local_fd);
 
-    driver_loop(machine_id, left_fd, right_fd, local_fd);
+    if (inject_token) {
+        inject_initial_token(machine_id, right_fd);
+    }
+
+    driver_loop(&state, left_fd, right_fd, local_fd);
 
     close(left_fd);
     close(right_fd);

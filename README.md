@@ -66,13 +66,13 @@ Premier test a 2 drivers
 Dans un premier terminal :
 
 ```bash
-./ring_driver 1 5001 127.0.0.1 5002
+./ring_driver 1 5001 127.0.0.1 5002 1
 ```
 
 Dans un second terminal :
 
 ```bash
-./ring_driver 2 5002 127.0.0.1 5001
+./ring_driver 2 5002 127.0.0.1 5001 0
 ```
 
 Puis lancer un `Comm` pour chaque machine :
@@ -84,6 +84,13 @@ Puis lancer un `Comm` pour chaque machine :
 
 Un message envoye par `Comm 1` vers destination `2` doit traverser l'anneau et
 etre livre a `Comm 2`.
+
+Gestion du jeton
+
+- un seul `Driver` doit etre lance avec `inject_token = 1`
+- si un `Comm` envoie un message distant, le `Driver` le garde en attente
+- le message n'est emis sur l'anneau qu'a la reception du `MSG_TOKEN`
+- apres emission, le jeton continue sa circulation
 
 Nettoyage
 

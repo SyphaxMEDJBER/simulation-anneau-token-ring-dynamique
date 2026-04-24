@@ -32,7 +32,11 @@ static void print_local_msg(const struct ring_msg *msg)
            ring_msg_type_name(msg->type), msg->src, msg->dst, msg->size, msg->seq);
 
     if (msg->size > 0) {
-        printf("Message: %s\n", msg->data);
+        if (msg->type == MSG_INFO_REP) {
+            printf("Etat: %s\n", msg->data);
+        } else {
+            printf("Message: %s\n", msg->data);
+        }
     }
 }
 
