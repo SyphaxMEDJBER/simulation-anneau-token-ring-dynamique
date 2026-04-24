@@ -1,0 +1,46 @@
+Projet anneau token ring dynamique
+
+Etape 1. Definir le protocole
+- definir les types de messages
+- definir le format des trames
+- definir le role de Comm et Driver
+- definir la circulation du jeton
+
+Etape 2. Mettre en place le socle commun
+- creer un fichier commun .h
+- y mettre constantes, structures, enums et prototypes utiles
+
+Etape 3. Coder Driver minimal
+- recevoir depuis la gauche
+- retransmettre a droite
+- livrer localement a Comm si necessaire
+
+Etape 4. Coder Comm minimal
+- se connecter a Driver
+- proposer un menu simple
+- envoyer une demande locale a Driver
+
+Etape 5. Faire un anneau minimal fonctionnel
+- lancer 2 machines minimum
+- faire circuler un message simple
+- verifier le routage
+
+Etape 6. Ajouter la gestion du jeton
+- faire circuler le jeton
+- autoriser ou non l'emission locale
+
+Etape 7. Implementer les fonctions utilisateur de base
+- Emettre
+- Diffuser
+- Recuperer
+
+Etape 8. Ajouter la dynamique de l'anneau
+- connexion
+- deconnexion
+- maintien de la coherence de l'anneau
+
+Etape 9. Finaliser
+- transfert de fichier fiable
+- gestion des erreurs
+- regeneration du jeton
+- tests finaux

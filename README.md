@@ -29,6 +29,10 @@ Gestion et régénération du jeton
 
 Tolérance aux pannes
 
+Plan de travail en 9 etapes dans `etape.txt`.
+
+Specification initiale du protocole dans `PROTOCOLE_V1.md`.
+
 🛠 Technologies
 
 C
