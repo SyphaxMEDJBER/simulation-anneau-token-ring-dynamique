@@ -32,8 +32,6 @@ Tolérance aux pannes
 
 Plan de travail en 9 etapes dans `etape.txt`.
 
-Specification initiale du protocole dans `PROTOCOLE_V1.md`.
-
 Premiere validation visee
 
 - compiler `ring_driver` et `ring_comm`
@@ -62,6 +60,30 @@ Dans un second terminal :
 ```
 
 Si `Comm` envoie un message avec destination `1`, `Driver` le relivre localement.
+
+Premier test a 2 drivers
+
+Dans un premier terminal :
+
+```bash
+./ring_driver 1 5001 127.0.0.1 5002
+```
+
+Dans un second terminal :
+
+```bash
+./ring_driver 2 5002 127.0.0.1 5001
+```
+
+Puis lancer un `Comm` pour chaque machine :
+
+```bash
+./ring_comm 1
+./ring_comm 2
+```
+
+Un message envoye par `Comm 1` vers destination `2` doit traverser l'anneau et
+etre livre a `Comm 2`.
 
 Nettoyage
 

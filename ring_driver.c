@@ -1,5 +1,8 @@
 /* Driver minimal de l'anneau. */
 #include "ring_common.h"
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -17,10 +20,21 @@ static int must_deliver_local(int machine_id, const struct ring_msg *msg)
     return 0;
 }
 
-/* Affichage simple d'une trame pour le debug. */
-static void print_msg(const struct ring_msg *msg)
+/*
+ * Retourne vrai si la trame doit continuer sur l'anneau.
+ * En V1, une trame unicast s'arrete a sa destination.
+ */
+static int must_forward_right(int machine_id, const struct ring_msg *msg)
 {
-    printf("Driver recoit type=%s src=%d dst=%d size=%d seq=%d\n",
+    if (msg->dst == machine_id) return 0;
+    return 1;
+}
+
+/* Affichage simple d'une trame pour le debug. */
+static void print_msg(const char *prefix, const struct ring_msg *msg)
+{
+    printf("%s type=%s src=%d dst=%d size=%d seq=%d\n",
+           prefix,
            ring_msg_type_name(msg->type), msg->src, msg->dst, msg->size, msg->seq);
 
     if (msg->size > 0) {
@@ -52,38 +66,114 @@ static int create_local_server(int machine_id, char *path, size_t path_size)
 }
 
 /*
- * Traite un message recu depuis le Comm local.
- * Le routage anneau n'est pas encore branche: on livre seulement en local.
+ * Cree la socket TCP d'ecoute pour recevoir depuis le voisin gauche.
  */
-static void handle_local_msg(int machine_id, int local_fd)
+static int create_left_server(int port)
+{
+    int sock;
+    int opt = 1;
+    struct sockaddr_in addr;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+    sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock == -1) FATAL("socket left");
+
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1) FATAL("setsockopt left");
+    if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) == -1) FATAL("bind left");
+    if (listen(sock, 1) == -1) FATAL("listen left");
+
+    return sock;
+}
+
+/* Etablit la connexion TCP vers le voisin droit. */
+static int connect_right_peer(const char *host, int port)
+{
+    int sock;
+    struct hostent *hp;
+    struct sockaddr_in addr;
+
+    hp = gethostbyname(host);
+    if (hp == NULL) FATAL("gethostbyname right");
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+    memcpy(&addr.sin_addr, hp->h_addr_list[0], (size_t)hp->h_length);
+
+    while (1) {
+        sock = socket(AF_INET, SOCK_STREAM, 0);
+        if (sock == -1) FATAL("socket right");
+
+        if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+            return sock;
+        }
+
+        close(sock);
+        sleep(1);
+    }
+}
+
+/* Traite un message recu depuis le Comm local. */
+static void handle_local_msg(int machine_id, int local_fd, int right_fd)
 {
     struct ring_msg msg;
 
     if (recv_ring_msg(local_fd, &msg) == -1) FATAL("recv_ring_msg local");
 
-    printf("Driver recoit depuis Comm:\n");
-    print_msg(&msg);
+    print_msg("Driver recoit depuis Comm:", &msg);
 
     if (must_deliver_local(machine_id, &msg)) {
         if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
-    } else {
-        printf("Destination distante %d: anneau externe pas encore branche\n", msg.dst);
+        return;
+    }
+
+    if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg right");
+}
+
+/* Traite un message recu depuis le voisin gauche. */
+static void handle_left_msg(int machine_id, int left_fd, int right_fd, int local_fd)
+{
+    struct ring_msg msg;
+
+    if (recv_ring_msg(left_fd, &msg) == -1) FATAL("recv_ring_msg left");
+
+    print_msg("Driver recoit depuis anneau:", &msg);
+
+    if (must_deliver_local(machine_id, &msg)) {
+        if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
+    }
+
+    if (must_forward_right(machine_id, &msg)) {
+        if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg right");
     }
 }
 
 /* Boucle principale du Driver. */
-static void driver_loop(int machine_id, int local_fd)
+static void driver_loop(int machine_id, int left_fd, int right_fd, int local_fd)
 {
     fd_set rfds;
+    int maxfd;
+
+    maxfd = left_fd;
+    if (local_fd > maxfd) maxfd = local_fd;
 
     while (1) {
         FD_ZERO(&rfds);
         FD_SET(local_fd, &rfds);
+        FD_SET(left_fd, &rfds);
 
-        if (select(local_fd + 1, &rfds, NULL, NULL, NULL) == -1) FATAL("select");
+        if (select(maxfd + 1, &rfds, NULL, NULL, NULL) == -1) FATAL("select");
 
         if (FD_ISSET(local_fd, &rfds)) {
-            handle_local_msg(machine_id, local_fd);
+            handle_local_msg(machine_id, local_fd, right_fd);
+        }
+
+        if (FD_ISSET(left_fd, &rfds)) {
+            handle_left_msg(machine_id, left_fd, right_fd, local_fd);
         }
     }
 }
@@ -91,35 +181,63 @@ static void driver_loop(int machine_id, int local_fd)
 int main(int argc, char *argv[])
 {
     int machine_id;
+    int left_port;
     int listen_fd;
+    int left_fd;
     int local_fd;
+    int left_local_fd;
+    int right_fd;
+    const char *right_host;
+    int right_port;
     char local_path[RING_SOCK_PATH_MAX];
 
     /*
-     * Argument :
+     * Arguments :
      *  machine_id : identifiant logique de la machine
+     *  left_port  : port TCP d'ecoute depuis le voisin gauche
+     *  right_host : hote du voisin droit
+     *  right_port : port TCP du voisin droit
      */
-    if (argc != 2) {
-        printf("Usage: %s machine_id\n", argv[0]);
+    if (argc != 5) {
+        printf("Usage: %s machine_id left_port right_host right_port\n", argv[0]);
         exit(1);
     }
 
     machine_id = atoi(argv[1]);
+    left_port = atoi(argv[2]);
+    right_host = argv[3];
+    right_port = atoi(argv[4]);
 
     listen_fd = create_local_server(machine_id, local_path, sizeof(local_path));
+    left_local_fd = create_left_server(left_port);
 
-    printf("driver pret: machine=%d local=%s\n", machine_id, local_path);
+    printf("driver pret: machine=%d local=%s left_port=%d\n",
+           machine_id, local_path, left_port);
     printf("driver attend la connexion de Comm...\n");
 
     local_fd = accept(listen_fd, NULL, NULL);
     if (local_fd == -1) FATAL("accept local");
 
     printf("driver connecte au Comm local\n");
+    printf("driver tente la connexion vers le voisin droit %s:%d...\n", right_host, right_port);
+
+    right_fd = connect_right_peer(right_host, right_port);
+    printf("driver connecte au voisin droit\n");
+
+    printf("driver attend la connexion du voisin gauche...\n");
+
+    left_fd = accept(left_local_fd, NULL, NULL);
+    if (left_fd == -1) FATAL("accept left");
+
+    printf("driver connecte au voisin gauche\n");
 
     close(listen_fd);
+    close(left_local_fd);
 
-    driver_loop(machine_id, local_fd);
+    driver_loop(machine_id, left_fd, right_fd, local_fd);
 
+    close(left_fd);
+    close(right_fd);
     close(local_fd);
     unlink(local_path);
 

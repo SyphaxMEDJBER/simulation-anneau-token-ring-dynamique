@@ -1,5 +1,6 @@
 *.o
 *.out
+.nfs*
 
 ring_driver
 ring_comm
