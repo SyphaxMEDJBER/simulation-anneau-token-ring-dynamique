@@ -88,5 +88,5 @@ const char *ring_msg_type_name(int type)
 
 void ring_make_local_path(char *path, size_t size, int machine_id)
 {
-    snprintf(path, size, "/tmp/ring_local_%d.sock", machine_id);
+    snprintf(path, size, "/tmp/ring_local_%ld_%d.sock", (long)getuid(), machine_id);
 }

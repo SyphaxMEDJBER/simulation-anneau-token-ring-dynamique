@@ -381,13 +381,23 @@ static void transfer_file(int local_fd, int machine_id)
         return;
     }
 
-    while ((n = fread(msg.data, 1, sizeof(msg.data), fp)) > 0) {
+    while (1) {
         ring_msg_init(&msg, MSG_FILE_DATA, machine_id, dst);
+
+        n = fread(msg.data, 1, sizeof(msg.data), fp);
+        if (n == 0) break;
+
         msg.seq = ++seq;
         msg.size = (int)n;
 
-        if (n < sizeof(msg.data) && feof(fp)) {
+        if (n < sizeof(msg.data) || fgetc(fp) == EOF) {
             msg.flags |= RING_FLAG_FILE_END;
+        } else {
+            if (fseek(fp, -1L, SEEK_CUR) == -1) {
+                perror("fseek send");
+                fclose(fp);
+                return;
+            }
         }
 
         for (tries = 0; tries < 3; tries++) {

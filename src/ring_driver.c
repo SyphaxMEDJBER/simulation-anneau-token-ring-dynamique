@@ -99,6 +99,20 @@ static void send_status_to_comm(int local_fd, int machine_id, const char *text)
     }
 }
 
+static int deliver_to_comm(struct driver_state *state, const struct ring_msg *msg)
+{
+    if (state->local_fd == -1) return -1;
+
+    if (send_ring_msg(state->local_fd, msg) == -1) {
+        perror("send_ring_msg local");
+        close(state->local_fd);
+        state->local_fd = -1;
+        return -1;
+    }
+
+    return 0;
+}
+
 static void append_machine_info(struct ring_msg *msg, const struct driver_state *state)
 {
     char line[96];
@@ -232,6 +246,19 @@ static int accept_left_with_timeout(int listen_fd, int timeout_ms)
     return accept(listen_fd, NULL, NULL);
 }
 
+static int fd_readable_with_timeout(int fd, int timeout_ms)
+{
+    fd_set rfds;
+    struct timeval tv;
+
+    FD_ZERO(&rfds);
+    FD_SET(fd, &rfds);
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+    return select(fd + 1, &rfds, NULL, NULL, &tv);
+}
+
 static void reconnect_right(struct driver_state *state, int local_fd, const char *host, int port)
 {
     int new_fd;
@@ -279,9 +306,10 @@ static int send_join_control_request(const char *host_b, int port_b, int machine
     return parse_host_port(rep.data, next_host, next_host_size, next_port);
 }
 
-static void handle_left_control_connection(struct driver_state *state, int local_fd)
+static void handle_left_extra_connection(struct driver_state *state, int local_fd)
 {
     int fd;
+    int rc;
     struct ring_msg msg;
     struct ring_msg rep;
     char host[108];
@@ -289,6 +317,16 @@ static void handle_left_control_connection(struct driver_state *state, int local
 
     fd = accept(state->left_listen_fd, NULL, NULL);
     if (fd == -1) return;
+
+    rc = fd_readable_with_timeout(fd, 300);
+    if (rc <= 0) {
+        if (state->left_fd != -1) {
+            close(state->left_fd);
+        }
+        state->left_fd = fd;
+        send_status_to_comm(local_fd, state->machine_id, "Nouveau voisin gauche raccorde");
+        return;
+    }
 
     if (recv_ring_msg(fd, &msg) == -1) {
         close(fd);
@@ -381,7 +419,10 @@ static void maybe_regenerate_token(struct driver_state *state)
 static void queue_local_request(struct driver_state *state, int local_fd, struct ring_msg *msg)
 {
     msg->src = state->machine_id;
-    msg->seq = ++state->next_seq;
+
+    if (msg->type != MSG_FILE_REQ && msg->type != MSG_FILE_DATA && msg->type != MSG_FILE_ACK) {
+        msg->seq = ++state->next_seq;
+    }
 
     if (msg->type == MSG_INFO_REQ) {
         append_machine_info(msg, state);
@@ -408,7 +449,7 @@ static int handle_local_msg(struct driver_state *state, int local_fd)
     print_msg("Driver recoit depuis Comm:", &msg);
 
     if (msg.type == MSG_DATA && must_deliver_local(state, &msg)) {
-        if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
+        deliver_to_comm(state, &msg);
         return 0;
     }
 
@@ -460,12 +501,13 @@ static int handle_local_msg(struct driver_state *state, int local_fd)
 static void handle_info_req(struct driver_state *state, int right_fd, int local_fd, struct ring_msg *msg)
 {
     (void)right_fd;
+    (void)local_fd;
 
     if (msg->src == state->machine_id) {
         msg->type = MSG_INFO_REP;
         msg->dst = state->machine_id;
         msg->flags = RING_FLAG_INFO_END;
-        if (send_ring_msg(local_fd, msg) == -1) FATAL("send_ring_msg local");
+        deliver_to_comm(state, msg);
         return;
     }
 
@@ -508,6 +550,7 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
                 state->active = 0;
                 state->leave_after_send = 0;
                 send_status_to_comm(local_fd, state->machine_id, "Machine sortie de l anneau");
+                return 0;
             }
         }
 
@@ -518,11 +561,11 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
     if (msg.type == MSG_BROADCAST) {
         if (msg.src == state->machine_id) {
             printf("Driver recupere sa propre diffusion, fin de tour\n");
-            if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
+            deliver_to_comm(state, &msg);
             return 0;
         }
 
-        if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
+        deliver_to_comm(state, &msg);
         if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg right");
         return 0;
     }
@@ -552,7 +595,7 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
     }
 
     if (must_deliver_local(state, &msg)) {
-        if (send_ring_msg(local_fd, &msg) == -1) FATAL("send_ring_msg local");
+        deliver_to_comm(state, &msg);
     }
 
     if (must_forward_right(state, &msg)) {
@@ -616,7 +659,7 @@ static void driver_loop(struct driver_state *state)
                     send_status_to_comm(state->local_fd, state->machine_id, "JOIN termine");
                 }
             } else {
-                handle_left_control_connection(state, state->local_fd);
+                handle_left_extra_connection(state, state->local_fd);
             }
         }
 
