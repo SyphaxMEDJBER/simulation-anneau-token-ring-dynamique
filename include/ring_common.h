@@ -1,23 +1,21 @@
 #ifndef RING_COMMON_H
 #define RING_COMMON_H
 
-/* Fonctions standard d'entree/sortie (perror, snprintf). */
 #include <stdio.h>
-/* Fonctions utilitaires (exit). */
 #include <stdlib.h>
-/* Fonctions de manipulation memoire/chaines. */
 #include <string.h>
-/* select. */
 #include <sys/select.h>
-/* Taille maximale de la charge utile d'une trame. */
+
 #define RING_DATA_MAX 240
-/* Taille max d'un chemin de socket UNIX. */
 #define RING_SOCK_PATH_MAX 108
 
-/* Valeur speciale pour une diffusion a tout l'anneau. */
+#define RING_FLAG_STATUS   1
+#define RING_FLAG_INFO_END 2
+#define RING_FLAG_FILE_END 4
+#define RING_FLAG_FILE_REQ 8
+
 #define RING_BROADCAST_ID (-1)
 
-/* Type de message echange sur l'anneau ou en local. */
 enum ring_msg_type {
     MSG_TOKEN = 1,
     MSG_DATA,
@@ -28,10 +26,10 @@ enum ring_msg_type {
     MSG_LEAVE,
     MSG_FILE_REQ,
     MSG_FILE_DATA,
-    MSG_FILE_ACK
+    MSG_FILE_ACK,
+    MSG_NEIGHBOR_REP
 };
 
-/* Trame commune a Driver et Comm. */
 struct ring_msg {
     int type;
     int src;
@@ -42,7 +40,6 @@ struct ring_msg {
     char data[RING_DATA_MAX];
 };
 
-/* Macro d'arret en cas d'erreur systeme. */
 #define FATAL(msg) do { perror(msg); exit(1); } while (0)
 
 int write_all(int fd, const void *buf, size_t len);

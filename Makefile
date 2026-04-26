@@ -1,26 +1,34 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -std=c11
+CFLAGS = -Wall -Wextra -std=c11 -Iinclude
+BUILD_DIR = build
+BIN_DIR = bin
+SRC_DIR = src
 
-COMMON_OBJ = ring_common.o
+DRIVER_OBJ = $(BUILD_DIR)/ring_driver.o
+COMM_OBJ = $(BUILD_DIR)/ring_comm.o
+COMMON_OBJ = $(BUILD_DIR)/ring_common.o
 
-all: ring_driver ring_comm
+all: dirs $(BIN_DIR)/ring_driver $(BIN_DIR)/ring_comm
 
-ring_driver: ring_driver.o $(COMMON_OBJ)
-	$(CC) $(CFLAGS) -o $@ ring_driver.o $(COMMON_OBJ)
+dirs:
+	mkdir -p $(BUILD_DIR) $(BIN_DIR)
 
-ring_comm: ring_comm.o $(COMMON_OBJ)
-	$(CC) $(CFLAGS) -o $@ ring_comm.o $(COMMON_OBJ)
+$(BIN_DIR)/ring_driver: $(DRIVER_OBJ) $(COMMON_OBJ)
+	$(CC) $(CFLAGS) -o $@ $(DRIVER_OBJ) $(COMMON_OBJ)
 
-ring_driver.o: ring_driver.c ring_common.h
-	$(CC) $(CFLAGS) -c ring_driver.c
+$(BIN_DIR)/ring_comm: $(COMM_OBJ) $(COMMON_OBJ)
+	$(CC) $(CFLAGS) -o $@ $(COMM_OBJ) $(COMMON_OBJ)
 
-ring_comm.o: ring_comm.c ring_common.h
-	$(CC) $(CFLAGS) -c ring_comm.c
+$(BUILD_DIR)/ring_driver.o: $(SRC_DIR)/ring_driver.c include/ring_common.h
+	$(CC) $(CFLAGS) -c $(SRC_DIR)/ring_driver.c -o $@
 
-ring_common.o: ring_common.c ring_common.h
-	$(CC) $(CFLAGS) -c ring_common.c
+$(BUILD_DIR)/ring_comm.o: $(SRC_DIR)/ring_comm.c include/ring_common.h
+	$(CC) $(CFLAGS) -c $(SRC_DIR)/ring_comm.c -o $@
+
+$(BUILD_DIR)/ring_common.o: $(SRC_DIR)/ring_common.c include/ring_common.h
+	$(CC) $(CFLAGS) -c $(SRC_DIR)/ring_common.c -o $@
 
 clean:
-	rm -f *.o ring_driver ring_comm
+	rm -f $(BUILD_DIR)/*.o $(BIN_DIR)/ring_driver $(BIN_DIR)/ring_comm
 
-.PHONY: all clean
+.PHONY: all clean dirs

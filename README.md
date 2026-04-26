@@ -30,8 +30,6 @@ Gestion et régénération du jeton
 
 Tolérance aux pannes
 
-Plan de travail en 9 etapes dans `etape.txt`.
-
 Premiere validation visee
 
 - compiler `ring_driver` et `ring_comm`
@@ -50,13 +48,13 @@ Premier test local
 Dans un premier terminal :
 
 ```bash
-./ring_driver 1
+./bin/ring_driver 1 5001 127.0.0.1 5001 1
 ```
 
 Dans un second terminal :
 
 ```bash
-./ring_comm 1
+./bin/ring_comm 1
 ```
 
 Si `Comm` envoie un message avec destination `1`, `Driver` le relivre localement.
@@ -66,20 +64,20 @@ Premier test a 2 drivers
 Dans un premier terminal :
 
 ```bash
-./ring_driver 1 5001 127.0.0.1 5002 1
+./bin/ring_driver 1 5001 127.0.0.1 5002 1
 ```
 
 Dans un second terminal :
 
 ```bash
-./ring_driver 2 5002 127.0.0.1 5001 0
+./bin/ring_driver 2 5002 127.0.0.1 5001 0
 ```
 
 Puis lancer un `Comm` pour chaque machine :
 
 ```bash
-./ring_comm 1
-./ring_comm 2
+./bin/ring_comm 1
+./bin/ring_comm 2
 ```
 
 Un message envoye par `Comm 1` vers destination `2` doit traverser l'anneau et
@@ -97,9 +95,33 @@ Fonctions utilisateur de base
 - `Emettre` : envoi d'un message vers une machine destination
 - `Diffuser` : envoi d'un message a tout l'anneau
 - `Recuperer` : collecte des informations des machines de l'anneau
+- la machine source recupere aussi sa propre diffusion quand elle revient
+- les messages d'etat locaux sont distingues des vraies reponses d'information
+- `Transferer un fichier` : envoi par blocs `MSG_FILE_REQ` / `MSG_FILE_DATA`
+- `JOIN` / `LEAVE` : commandes presentes cote `Comm`
+- `JOIN` / `LEAVE` : reconfiguration minimale du voisin droit en cours d'execution
 
 Pour `Recuperer`, le message de requete circule dans l'anneau et chaque Driver
 ajoute une ligne d'information avant le retour a la machine source.
+
+Transfert de fichier
+
+- le fichier source est lu en binaire
+- un message `MSG_FILE_REQ` annonce le nom du fichier
+- des blocs `MSG_FILE_DATA` suivent ensuite sur l'anneau
+- le dernier bloc porte le drapeau `RING_FLAG_FILE_END`
+- le recepteur cree un fichier `received/recv_<nom>`
+
+Reconfiguration dynamique
+
+- `JOIN` part d'une machine hors anneau `N` qui contacte une machine `B`
+- `B` renvoie son voisin courant `C`, puis l'insertion devient `B -> N -> C`
+- une machine hors anneau peut etre lancee avec `right_host = -` et `right_port = 0`
+- `LEAVE` permet a une machine `N` de quitter l'anneau et de faire reconnecter `B -> C`
+- si un voisin gauche disparait, le Driver attend automatiquement un nouveau
+  rattachement pendant un court delai
+- ce mecanisme permet une demonstration simple : anneau a 3 machines, insertion
+  d'une 4e machine, puis retrait de cette machine
 
 Nettoyage
 

@@ -1,7 +1,11 @@
 *.o
 *.out
 .nfs*
-
+recv_*
+test.txt
+build/
+bin/
+received/recv_*
 ring_driver
 ring_comm
 
