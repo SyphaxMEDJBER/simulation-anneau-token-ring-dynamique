@@ -12,6 +12,17 @@
 #define RING_QUEUE_MAX 256
 #define TOKEN_TIMEOUT_MS 5000
 
+/*
+ * Structure principale du Driver.
+ * --------------------------------
+ * Elle regroupe tout l'etat necessaire a une machine logique:
+ * - ses identifiants reseau (ports, hote du voisin droit),
+ * - les descripteurs de sockets,
+ * - son etat de participation a l'anneau,
+ * - les indicateurs lies a JOIN / LEAVE,
+ * - les compteurs utiles au jeton et aux messages,
+ * - la file locale des trames en attente d'emission.
+ */
 struct driver_state {
     int machine_id;
     int left_port;
@@ -29,12 +40,21 @@ struct driver_state {
     int next_seq;
     long last_token_ms;
     long last_regen_ms;
+
+    /* File circulaire des messages locaux en attente du jeton. */
     int q_head;
     int q_tail;
     int q_count;
     struct ring_msg queue[RING_QUEUE_MAX];
 };
 
+/*
+ * Fonction: now_ms
+ * ----------------
+ * Retourne l'heure courante en millisecondes.
+ * Le Driver utilise cette valeur pour mesurer le temps ecoule depuis le
+ * dernier jeton recu et pour decider, si besoin, d'une regeneration.
+ */
 static long now_ms(void)
 {
     struct timeval tv;
@@ -43,51 +63,100 @@ static long now_ms(void)
     return (long)(tv.tv_sec * 1000L + tv.tv_usec / 1000L);
 }
 
+/*
+ * Fonction: must_deliver_local
+ * ----------------------------
+ * Indique si une trame doit etre remise au Comm local.
+ * Une machine inactive, c'est-a-dire hors anneau, ne consomme plus les
+ * messages applicatifs. Sinon, on livre:
+ * - tout message dont la destination vaut l'identifiant local,
+ * - tout message de diffusion.
+ */
 static int must_deliver_local(const struct driver_state *state, const struct ring_msg *msg)
 {
+    /* Une machine inactive ne consomme plus les messages applicatifs. */
     if (!state->active) return 0;
     if (msg->dst == state->machine_id) return 1;
     if (msg->dst == RING_BROADCAST_ID) return 1;
     return 0;
 }
 
+/*
+ * Fonction: must_forward_right
+ * ----------------------------
+ * Determine si une trame doit poursuivre sa circulation vers le voisin
+ * droit. Certains messages s'arretent naturellement lorsqu'ils reviennent
+ * a leur source, notamment les diffusions et les requetes d'information.
+ */
 static int must_forward_right(const struct driver_state *state, const struct ring_msg *msg)
 {
+    /* Un broadcast ou une requete d'info s'arrete lorsqu'il revient a sa source. */
     if (msg->type == MSG_BROADCAST && msg->src == state->machine_id) return 0;
     if (msg->type == MSG_INFO_REQ && msg->src == state->machine_id) return 0;
     if (msg->dst == state->machine_id) return 0;
     return 1;
 }
 
+/*
+ * Fonction: queue_has_pending
+ * ---------------------------
+ * Test rapide indiquant si le Driver a au moins une trame locale en attente
+ * d'emission. Cette file d'attente est necessaire car une machine ne peut
+ * emettre qu'au moment ou elle recoit le jeton.
+ */
 static int queue_has_pending(const struct driver_state *state)
 {
     return state->q_count > 0;
 }
 
+/*
+ * Fonction: queue_push
+ * --------------------
+ * Ajoute une trame en fin de file circulaire.
+ * Si la file est pleine, la fonction echoue pour eviter d'ecraser des
+ * messages deja en attente.
+ */
 static int queue_push(struct driver_state *state, const struct ring_msg *msg)
 {
     if (state->q_count >= RING_QUEUE_MAX) return -1;
 
+    /* Insertion en fin de file. */
     state->queue[state->q_tail] = *msg;
     state->q_tail = (state->q_tail + 1) % RING_QUEUE_MAX;
     state->q_count++;
     return 0;
 }
 
+/*
+ * Fonction: queue_pop
+ * -------------------
+ * Retire la trame la plus ancienne de la file circulaire.
+ * On respecte ainsi un ordre FIFO entre les demandes d'emission locales.
+ */
 static int queue_pop(struct driver_state *state, struct ring_msg *msg)
 {
     if (state->q_count == 0) return -1;
 
+    /* Extraction en tete de file. */
     *msg = state->queue[state->q_head];
     state->q_head = (state->q_head + 1) % RING_QUEUE_MAX;
     state->q_count--;
     return 0;
 }
 
+/*
+ * Fonction: send_status_to_comm
+ * -----------------------------
+ * Construit et envoie un message d'etat vers le Comm local.
+ * Ce mecanisme est utilise pour rendre l'execution lisible depuis
+ * l'interface utilisateur: attente du jeton, fin de JOIN, LEAVE en cours,
+ * erreur de configuration, etc.
+ */
 static void send_status_to_comm(int local_fd, int machine_id, const char *text)
 {
     struct ring_msg msg;
 
+    /* Les messages d'etat servent a informer l'IHM locale. */
     if (local_fd == -1) return;
 
     ring_msg_init(&msg, MSG_INFO_REP, machine_id, machine_id);
@@ -99,10 +168,19 @@ static void send_status_to_comm(int local_fd, int machine_id, const char *text)
     }
 }
 
+/*
+ * Fonction: deliver_to_comm
+ * -------------------------
+ * Livre une trame deja destinee a la machine locale.
+ * Si la socket locale est cassee, le Driver invalide simplement la liaison
+ * avec le Comm sans s'arreter. Cela permet au Driver de survivre a la
+ * fermeture puis a la relance de l'interface utilisateur.
+ */
 static int deliver_to_comm(struct driver_state *state, const struct ring_msg *msg)
 {
     if (state->local_fd == -1) return -1;
 
+    /* Si le Comm local est perdu, on invalide simplement la liaison locale. */
     if (send_ring_msg(state->local_fd, msg) == -1) {
         perror("send_ring_msg local");
         close(state->local_fd);
@@ -113,12 +191,20 @@ static int deliver_to_comm(struct driver_state *state, const struct ring_msg *ms
     return 0;
 }
 
+/*
+ * Fonction: append_machine_info
+ * -----------------------------
+ * Ajoute dans la charge utile d'un message une ligne de description de la
+ * machine courante. Cette fonction est au coeur de l'option "Recuperer"
+ * car chaque Driver complete la meme trame au passage.
+ */
 static void append_machine_info(struct ring_msg *msg, const struct driver_state *state)
 {
     char line[96];
     size_t cur;
     int n;
 
+    /* Chaque Driver ajoute sa propre ligne a la reponse "Recuperer". */
     cur = (size_t)msg->size;
     n = snprintf(line, sizeof(line), "machine=%d portE=%d portS=%d active=%d\n",
                  state->machine_id, state->left_port, state->right_port, state->active);
@@ -131,6 +217,13 @@ static void append_machine_info(struct ring_msg *msg, const struct driver_state 
     msg->data[msg->size] = '\0';
 }
 
+/*
+ * Fonction: print_msg
+ * -------------------
+ * Affiche une trace de debug lisible pour suivre la circulation des trames.
+ * Elle sert uniquement a observer le comportement du protocole pendant les
+ * tests et n'intervient pas dans la logique fonctionnelle.
+ */
 static void print_msg(const char *prefix, const struct ring_msg *msg)
 {
     printf("%s type=%s src=%d dst=%d size=%d seq=%d flags=%d\n",
@@ -142,6 +235,13 @@ static void print_msg(const char *prefix, const struct ring_msg *msg)
     }
 }
 
+/*
+ * Fonction: create_local_server
+ * -----------------------------
+ * Cree la socket UNIX d'ecoute entre le Driver et son Comm local.
+ * Le chemin est supprime au prealable pour eviter qu'un ancien fichier
+ * de socket ne bloque le redemarrage du programme.
+ */
 static int create_local_server(int machine_id, char *path, size_t path_size)
 {
     int sock;
@@ -154,6 +254,7 @@ static int create_local_server(int machine_id, char *path, size_t path_size)
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
 
+    /* Socket locale UNIX entre Comm et Driver. */
     sock = socket(AF_UNIX, SOCK_STREAM, 0);
     if (sock == -1) FATAL("socket local");
 
@@ -163,6 +264,13 @@ static int create_local_server(int machine_id, char *path, size_t path_size)
     return sock;
 }
 
+/*
+ * Fonction: create_left_server
+ * ----------------------------
+ * Cree la socket TCP d'ecoute correspondant au voisin gauche.
+ * Dans ce projet, chaque liaison de l'anneau est orientee: le Driver lit
+ * les trames depuis la gauche et les retransmet vers la droite.
+ */
 static int create_left_server(int port)
 {
     int sock;
@@ -174,6 +282,7 @@ static int create_left_server(int port)
     addr.sin_port = htons((unsigned short)port);
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
+    /* Socket d'ecoute pour le voisin gauche de l'anneau. */
     sock = socket(AF_INET, SOCK_STREAM, 0);
     if (sock == -1) FATAL("socket left");
 
@@ -184,6 +293,14 @@ static int create_left_server(int port)
     return sock;
 }
 
+/*
+ * Fonction: connect_right_peer
+ * ----------------------------
+ * Etablit la connexion TCP vers le voisin droit.
+ * La fonction retente indefiniment tant que la connexion n'aboutit pas,
+ * ce qui simplifie le lancement manuel des differents Drivers dans des
+ * terminaux distincts.
+ */
 static int connect_right_peer(const char *host, int port)
 {
     int sock;
@@ -198,6 +315,7 @@ static int connect_right_peer(const char *host, int port)
     addr.sin_port = htons((unsigned short)port);
     memcpy(&addr.sin_addr, hp->h_addr_list[0], (size_t)hp->h_length);
 
+    /* La connexion vers le voisin droit est retentee tant qu'elle n'aboutit pas. */
     while (1) {
         sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock == -1) FATAL("socket right");
@@ -211,18 +329,40 @@ static int connect_right_peer(const char *host, int port)
     }
 }
 
+/*
+ * Fonction: parse_host_port
+ * -------------------------
+ * Extrait depuis une chaine deux informations de controle:
+ * - un nom d'hote ou une adresse IP,
+ * - un numero de port.
+ * Ce format est utilise dans plusieurs messages d'administration.
+ */
 static int parse_host_port(const char *text, char *host, size_t host_size, int *port)
 {
     (void)host_size;
     return sscanf(text, "%107s %d", host, port) == 2 ? 0 : -1;
 }
 
+/*
+ * Fonction: parse_host_port_ref
+ * -----------------------------
+ * Variante de parse_host_port qui extrait en plus un port de reference.
+ * Cette troisieme valeur est utile dans le message LEAVE pour permettre au
+ * predecesseur de reconnaitre qu'il doit se reconnecter au successeur.
+ */
 static int parse_host_port_ref(const char *text, char *host, size_t host_size, int *port, int *ref_port)
 {
     (void)host_size;
     return sscanf(text, "%107s %d %d", host, port, ref_port) == 3 ? 0 : -1;
 }
 
+/*
+ * Fonction: is_detached_right
+ * ---------------------------
+ * Indique si la machine doit demarrer hors anneau.
+ * Dans ce cas, aucun voisin droit initial n'est defini et la machine devra
+ * utiliser l'operation JOIN avant de redevenir active.
+ */
 static int is_detached_right(const char *host, int port)
 {
     if (port <= 0) return 1;
@@ -231,6 +371,13 @@ static int is_detached_right(const char *host, int port)
     return 0;
 }
 
+/*
+ * Fonction: accept_left_with_timeout
+ * ----------------------------------
+ * Attend une connexion entrante sur une socket d'ecoute pendant un delai
+ * borne. Cette attente bornee est utile lorsqu'on souhaite laisser vivre
+ * le Driver sans le bloquer indefiniment sur un accept().
+ */
 static int accept_left_with_timeout(int listen_fd, int timeout_ms)
 {
     fd_set rfds;
@@ -246,6 +393,13 @@ static int accept_left_with_timeout(int listen_fd, int timeout_ms)
     return accept(listen_fd, NULL, NULL);
 }
 
+/*
+ * Fonction: fd_readable_with_timeout
+ * ----------------------------------
+ * Teste si un descripteur devient lisible dans un delai donne.
+ * Le Driver s'en sert pour distinguer une vraie connexion de voisin gauche
+ * d'une connexion de controle JOIN qui envoie immediatement une trame.
+ */
 static int fd_readable_with_timeout(int fd, int timeout_ms)
 {
     fd_set rfds;
@@ -259,10 +413,20 @@ static int fd_readable_with_timeout(int fd, int timeout_ms)
     return select(fd + 1, &rfds, NULL, NULL, &tv);
 }
 
+/*
+ * Fonction: reconnect_right
+ * -------------------------
+ * Remplace proprement le voisin droit courant par un nouveau voisin.
+ * Cette primitive est reutilisee dans les trois cas principaux:
+ * - insertion d'une nouvelle machine (JOIN),
+ * - retrait d'une machine (LEAVE),
+ * - reconfiguration explicite de l'anneau.
+ */
 static void reconnect_right(struct driver_state *state, int local_fd, const char *host, int port)
 {
     int new_fd;
 
+    /* Utilise lors d'un JOIN, d'un LEAVE ou d'une reconfiguration. */
     if (state->right_fd != -1) {
         close(state->right_fd);
         state->right_fd = -1;
@@ -276,6 +440,18 @@ static void reconnect_right(struct driver_state *state, int local_fd, const char
     send_status_to_comm(local_fd, state->machine_id, "Voisin droit reconfigure");
 }
 
+/*
+ * Fonction: send_join_control_request
+ * -----------------------------------
+ * Permet a une machine N hors anneau de contacter une machine B deja
+ * presente pour lui demander l'identite de son successeur actuel C.
+ *
+ * Principe:
+ * 1. N ouvre une connexion de controle temporaire vers B.
+ * 2. N envoie un MSG_JOIN contenant son propre port d'ecoute gauche.
+ * 3. B repond avec un MSG_NEIGHBOR_REP contenant son voisin droit courant.
+ * 4. N peut alors se connecter a C avant que B ne bascule son lien vers N.
+ */
 static int send_join_control_request(const char *host_b, int port_b, int machine_id, int left_port,
                                      char *next_host, size_t next_host_size, int *next_port)
 {
@@ -283,6 +459,7 @@ static int send_join_control_request(const char *host_b, int port_b, int machine
     struct ring_msg msg;
     struct ring_msg rep;
 
+    /* La nouvelle machine demande a B quel est son successeur actuel. */
     fd = connect_right_peer(host_b, port_b);
 
     ring_msg_init(&msg, MSG_JOIN, machine_id, RING_BROADCAST_ID);
@@ -306,6 +483,18 @@ static int send_join_control_request(const char *host_b, int port_b, int machine
     return parse_host_port(rep.data, next_host, next_host_size, next_port);
 }
 
+/*
+ * Fonction: handle_left_extra_connection
+ * --------------------------------------
+ * Gere une connexion supplementaire arrivee sur le port gauche alors qu'un
+ * voisin gauche est deja branche.
+ *
+ * Deux situations sont possibles:
+ * - une connexion de controle JOIN, qui envoie tout de suite un MSG_JOIN;
+ * - un nouveau voisin gauche qui se raccorde effectivement a l'anneau.
+ *
+ * La distinction est faite par une courte attente de lisibilite.
+ */
 static void handle_left_extra_connection(struct driver_state *state, int local_fd)
 {
     int fd;
@@ -315,11 +504,14 @@ static void handle_left_extra_connection(struct driver_state *state, int local_f
     char host[108];
     int port;
 
+    /* Sur le port gauche, on peut recevoir soit un nouveau voisin, soit une
+       connexion temporaire de controle pour l'operation JOIN. */
     fd = accept(state->left_listen_fd, NULL, NULL);
     if (fd == -1) return;
 
     rc = fd_readable_with_timeout(fd, 300);
     if (rc <= 0) {
+        /* Aucun message immediat: on considere qu'il s'agit du nouveau voisin gauche. */
         if (state->left_fd != -1) {
             close(state->left_fd);
         }
@@ -334,6 +526,7 @@ static void handle_left_extra_connection(struct driver_state *state, int local_f
     }
 
     if (msg.type == MSG_JOIN && parse_host_port(msg.data, host, sizeof(host), &port) == 0) {
+        /* B renvoie d'abord son ancien successeur, puis se reconnecte vers N. */
         ring_msg_init(&rep, MSG_NEIGHBOR_REP, state->machine_id, msg.src);
         snprintf(rep.data, sizeof(rep.data), "%s %d", state->right_host, state->right_port);
         rep.size = (int)strlen(rep.data);
@@ -349,10 +542,18 @@ static void handle_left_extra_connection(struct driver_state *state, int local_f
     close(fd);
 }
 
+/*
+ * Fonction: handle_local_disconnect
+ * ---------------------------------
+ * Traite la fermeture ou la perte du Comm local.
+ * Le choix retenu est de conserver le Driver actif, puis de lui permettre
+ * d'accepter plus tard une nouvelle connexion locale depuis un Comm relance.
+ */
 static void handle_local_disconnect(struct driver_state *state)
 {
     int new_local;
 
+    /* Le Driver reste vivant meme si le Comm local est ferme. */
     if (state->local_fd != -1) {
         close(state->local_fd);
         state->local_fd = -1;
@@ -368,10 +569,19 @@ static void handle_local_disconnect(struct driver_state *state)
     printf("Driver sans Comm local, attente d'une reconnexion...\n");
 }
 
+/*
+ * Fonction: handle_left_disconnect
+ * --------------------------------
+ * Gere la perte du voisin gauche.
+ * Au lieu d'arreter brutalement la machine, le Driver ferme l'ancienne
+ * liaison puis attend un eventuel nouveau raccordement. Cette strategie
+ * est utile pendant un JOIN ou apres certaines reconfigurations.
+ */
 static void handle_left_disconnect(struct driver_state *state, int local_fd)
 {
     int new_left;
 
+    /* En cas de perte du voisin gauche, on reste en attente d'un nouveau raccordement. */
     if (state->left_fd != -1) {
         close(state->left_fd);
         state->left_fd = -1;
@@ -388,6 +598,13 @@ static void handle_left_disconnect(struct driver_state *state, int local_fd)
                         "Voisin gauche perdu, attente d'un nouveau raccordement");
 }
 
+/*
+ * Fonction: inject_initial_token
+ * ------------------------------
+ * Cree puis envoie le tout premier jeton dans l'anneau.
+ * Cette operation n'est executee qu'au demarrage par la machine designee
+ * comme injectrice initiale, ou plus tard lors d'une regeneration.
+ */
 static void inject_initial_token(int machine_id, int right_fd)
 {
     struct ring_msg msg;
@@ -398,10 +615,21 @@ static void inject_initial_token(int machine_id, int right_fd)
     if (send_ring_msg(right_fd, &msg) == -1) FATAL("send_ring_msg token");
 }
 
+/*
+ * Fonction: maybe_regenerate_token
+ * --------------------------------
+ * Regeneration simple du jeton en cas de perte supposee.
+ * Si la machine courante est autorisee a le faire et qu'aucun jeton n'a
+ * ete observe depuis un certain delai, elle reinjecte un nouveau jeton.
+ *
+ * Ce mecanisme reste pedagogique: il traite surtout la disparition du
+ * jeton, pas la panne robuste d'un noeud complet.
+ */
 static void maybe_regenerate_token(struct driver_state *state)
 {
     long now;
 
+    /* Regeneration simple: une machine autorisee recree le jeton apres timeout. */
     if (!state->can_regen_token) return;
     if (state->right_fd == -1) return;
 
@@ -416,15 +644,26 @@ static void maybe_regenerate_token(struct driver_state *state)
     state->last_regen_ms = now;
 }
 
+/*
+ * Fonction: queue_local_request
+ * -----------------------------
+ * Prepare puis place dans la file d'attente une requete issue du Comm.
+ * Le Driver complete ici certains champs protocolaires:
+ * - la source locale,
+ * - le numero de sequence pour les messages classiques,
+ * - la ligne locale initiale pour une requete d'information.
+ */
 static void queue_local_request(struct driver_state *state, int local_fd, struct ring_msg *msg)
 {
     msg->src = state->machine_id;
 
+    /* Les transferts de fichiers gardent leurs numeros de sequence propres. */
     if (msg->type != MSG_FILE_REQ && msg->type != MSG_FILE_DATA && msg->type != MSG_FILE_ACK) {
         msg->seq = ++state->next_seq;
     }
 
     if (msg->type == MSG_INFO_REQ) {
+        /* La source ajoute deja sa ligne avant la mise en circulation. */
         append_machine_info(msg, state);
     }
 
@@ -436,6 +675,16 @@ static void queue_local_request(struct driver_state *state, int local_fd, struct
     send_status_to_comm(local_fd, state->machine_id, "Message mis en attente du jeton");
 }
 
+/*
+ * Fonction: handle_local_msg
+ * --------------------------
+ * Traite une trame envoyee par le Comm local.
+ * C'est ici que le Driver decide:
+ * - de livrer immediatement un message boucle sur soi-meme,
+ * - de lancer un JOIN,
+ * - de preparer un LEAVE,
+ * - ou simplement d'empiler la requete en attente du jeton.
+ */
 static int handle_local_msg(struct driver_state *state, int local_fd)
 {
     struct ring_msg msg;
@@ -449,11 +698,13 @@ static int handle_local_msg(struct driver_state *state, int local_fd)
     print_msg("Driver recoit depuis Comm:", &msg);
 
     if (msg.type == MSG_DATA && must_deliver_local(state, &msg)) {
+        /* Cas particulier utile pour tester une machine qui s'envoie un message a elle-meme. */
         deliver_to_comm(state, &msg);
         return 0;
     }
 
     if (msg.type == MSG_JOIN) {
+        /* JOIN: N contacte B, recupere C, se connecte a C puis attend que B se raccorde a elle. */
         if (parse_host_port(msg.data, host, sizeof(host), &port) == -1) {
             send_status_to_comm(local_fd, state->machine_id, "JOIN attend host_B port_B");
             return 0;
@@ -473,6 +724,8 @@ static int handle_local_msg(struct driver_state *state, int local_fd)
     }
 
     if (msg.type == MSG_LEAVE) {
+        /* LEAVE: la machine diffuse les informations necessaires pour que son
+           predecesseure se reconnecte a son successeur. */
         snprintf(msg.data, sizeof(msg.data), "%s %d %d",
                  state->right_host, state->right_port, state->left_port);
         msg.size = (int)strlen(msg.data);
@@ -498,11 +751,20 @@ static int handle_local_msg(struct driver_state *state, int local_fd)
     return 0;
 }
 
+/*
+ * Fonction: handle_info_req
+ * -------------------------
+ * Gere la propagation de la requete "Recuperer".
+ * Chaque Driver ajoute ses informations dans la meme trame. Lorsque la
+ * requete revient a la machine source, celle-ci la transforme en reponse
+ * finale et la remet uniquement a son Comm local.
+ */
 static void handle_info_req(struct driver_state *state, int right_fd, int local_fd, struct ring_msg *msg)
 {
     (void)right_fd;
     (void)local_fd;
 
+    /* Lorsque la requete revient a sa source, elle devient une reponse finale. */
     if (msg->src == state->machine_id) {
         msg->type = MSG_INFO_REP;
         msg->dst = state->machine_id;
@@ -515,6 +777,18 @@ static void handle_info_req(struct driver_state *state, int right_fd, int local_
     if (send_ring_msg(right_fd, msg) == -1) FATAL("send_ring_msg right");
 }
 
+/*
+ * Fonction: handle_left_msg
+ * -------------------------
+ * Traite toute trame entrante provenant du voisin gauche.
+ * Cette fonction centralise la logique reseau principale du Driver:
+ * - circulation du jeton,
+ * - emission des trames locales en attente,
+ * - diffusion,
+ * - recuperation d'informations,
+ * - retrait dynamique d'une machine,
+ * - livraison locale et retransmission generale.
+ */
 static int handle_left_msg(struct driver_state *state, int right_fd, int local_fd)
 {
     struct ring_msg msg;
@@ -528,6 +802,7 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
     print_msg("Driver recoit depuis anneau:", &msg);
 
     if (msg.type == MSG_TOKEN) {
+        /* Le jeton donne le droit d'emettre une trame locale en attente. */
         state->last_token_ms = now_ms();
 
         if (queue_has_pending(state)) {
@@ -539,6 +814,7 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
             send_status_to_comm(local_fd, state->machine_id, "Trame emise sur l anneau");
 
             if (out.type == MSG_LEAVE && out.src == state->machine_id && state->leave_after_send) {
+                /* La machine sortante se debranche logiquement apres l'envoi de son LEAVE. */
                 if (state->right_fd != -1) {
                     close(state->right_fd);
                     state->right_fd = -1;
@@ -559,6 +835,7 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
     }
 
     if (msg.type == MSG_BROADCAST) {
+        /* Le broadcast est livre a chaque machine active, puis stoppe a son retour a la source. */
         if (msg.src == state->machine_id) {
             printf("Driver recupere sa propre diffusion, fin de tour\n");
             deliver_to_comm(state, &msg);
@@ -576,6 +853,7 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
     }
 
     if (msg.type == MSG_LEAVE) {
+        /* Seul le predecesseur direct de la machine sortante doit se reconfigurer. */
         if (parse_host_port_ref(msg.data, host, sizeof(host), &port, &ref_port) == -1) {
             return 0;
         }
@@ -605,12 +883,26 @@ static int handle_left_msg(struct driver_state *state, int right_fd, int local_f
     return 0;
 }
 
+/*
+ * Fonction: driver_loop
+ * ---------------------
+ * Boucle centrale du Driver, fondee sur select().
+ * Elle surveille simultanement:
+ * - la connexion du Comm local,
+ * - le port d'ecoute gauche,
+ * - la liaison effective avec le voisin gauche.
+ *
+ * Cette boucle donne au Driver un comportement evenementiel simple a suivre
+ * et bien adapte a une simulation de protocole.
+ */
 static void driver_loop(struct driver_state *state)
 {
     fd_set rfds;
     int maxfd;
     struct timeval tv;
 
+    /* Boucle centrale: surveillance du Comm local, du voisin gauche et
+       des connexions de controle sur le meme port d'ecoute. */
     while (1) {
         FD_ZERO(&rfds);
         maxfd = -1;
@@ -650,6 +942,7 @@ static void driver_loop(struct driver_state *state)
 
         if (FD_ISSET(state->left_listen_fd, &rfds)) {
             if (state->left_fd == -1) {
+                /* Premiere connexion du voisin gauche, ou raccordement apres un JOIN. */
                 state->left_fd = accept(state->left_listen_fd, NULL, NULL);
                 if (state->left_fd == -1) FATAL("accept left");
                 send_status_to_comm(state->local_fd, state->machine_id, "Voisin gauche connecte");
@@ -659,6 +952,8 @@ static void driver_loop(struct driver_state *state)
                     send_status_to_comm(state->local_fd, state->machine_id, "JOIN termine");
                 }
             } else {
+                /* Si le port gauche est deja occupe, une nouvelle connexion correspond
+                   soit a un JOIN, soit a un remplacement du voisin gauche. */
                 handle_left_extra_connection(state, state->local_fd);
             }
         }
@@ -673,6 +968,17 @@ static void driver_loop(struct driver_state *state)
     }
 }
 
+/*
+ * Fonction principale du Driver.
+ * ------------------------------
+ * Cette fonction:
+ * 1. lit les parametres de lancement,
+ * 2. initialise l'etat local,
+ * 3. cree les sockets d'ecoute,
+ * 4. attend la connexion du Comm,
+ * 5. raccorde la machine a l'anneau initial si un voisin droit est fourni,
+ * 6. ou demarre hors anneau si la machine doit rejoindre plus tard via JOIN.
+ */
 int main(int argc, char *argv[])
 {
     int machine_id;
